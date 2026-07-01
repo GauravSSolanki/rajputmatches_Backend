@@ -16,4 +16,10 @@ const verifiedEmailSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("VerifiedEmail", verifiedEmailSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "VerifiedEmail",
+  verifiedEmailSchema,
+  COLLECTIONS.VERIFIED_EMAILS
+);

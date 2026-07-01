@@ -21,4 +21,10 @@ const HoroscopeDetailsSchema = new Schema({
   additionalInfo: { type: String, default: "No additional info" },
 });
 
-module.exports = mongoose.model("HoroscopeDetails", HoroscopeDetailsSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "HoroscopeDetails",
+  HoroscopeDetailsSchema,
+  COLLECTIONS.HOROSCOPE_PROFILES
+);

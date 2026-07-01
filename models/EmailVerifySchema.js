@@ -26,8 +26,11 @@ const EmailVerificationTokenSchema = new mongoose.Schema({
   },
 });
 
+const { COLLECTIONS } = require("./collections");
+
 const EmailVerificationToken = mongoose.model(
   "EmailVerificationToken",
-  EmailVerificationTokenSchema
+  EmailVerificationTokenSchema,
+  COLLECTIONS.EMAIL_VERIFICATION_TOKENS
 );
 module.exports = EmailVerificationToken;

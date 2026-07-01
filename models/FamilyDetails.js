@@ -15,4 +15,10 @@ const FamilyDetailsSchema = new Schema({
   familyInfo: { type: String, default: "" },
 });
 
-module.exports = mongoose.model("FamilyDetails", FamilyDetailsSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "FamilyDetails",
+  FamilyDetailsSchema,
+  COLLECTIONS.FAMILY_PROFILES
+);

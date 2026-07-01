@@ -1,21 +1,22 @@
-const User = require("../models/UserProfile.js");
-const HoroscopeDetails = require("../models/HoroscopeDetails");
-const FamilyDetails = require("../models/FamilyDetails");
-const ProfessionalDetails = require("../models/ProfessionalDetails");
-const ExtendedFamily = require("../models/ExtendedFamilyDetails.js");
+const {
+  MatrimonialUser: User,
+  HoroscopeProfile: HoroscopeDetails,
+  FamilyProfile: FamilyDetails,
+  ProfessionalProfile: ProfessionalDetails,
+  ExtendedFamilyProfile: ExtendedFamily,
+  Notification,
+  SubscriptionLimit: Limit,
+  CmsPage: Page,
+  MediaAlbum: files,
+  Story: Stories,
+  VerifiedEmail,
+  ContactRequest,
+  Admin,
+  ChatMessage: Message,
+  Chat,
+  PasswordResetToken: Tokenschema,
+} = require("../models");
 const { ProfileView, VisitedProfile } = require("../models/profileView.js");
-const Notification = require("../models/NotificationSchema.js");
-const Limit = require("../models/LimitSchema.js");
-const Page = require("../models/PageModel.js");
-const jwt = require("jsonwebtoken");
-const files = require("../models/PhotoSchema.js");
-const Stories = require("../models/StoriesSchema.js");
-const VerifiedEmail = require("../models/VerifiedEmailSchema.js");
-const ContactRequest = require("../models/ContactRequest.js");
-const Admin = require("../models/Admin.js");
-
-const Message = require("../models/Messages.js");
-const Chat = require("../models/Chat.js");
 const { validationResult } = require("express-validator");
 const bcrypt = require("bcrypt");
 const {
@@ -25,6 +26,8 @@ const {
 } = require("../middlewares/middleware.js");
 
 const { generateToken, getNextMatrimonyId } = require("../utils/utility.js");
+const { sendAdminForgetPasswordEmail } = require("../utils/email.js");
+
 const express = require("express");
 const mongoose = require("mongoose");
 
@@ -74,9 +77,13 @@ exports.login = async (req, res) => {
       return res.status(403).json({ message: "Account is not active." });
     }
 
-    const token = jwt.sign({ id: admin._id, role: admin.role }, JWT_SECRET, {
-      expiresIn: "1h",
-    });
+    const token = jwt.sign(
+      { id: admin._id, role: admin.role },
+      process.env.Admin_SECRET,
+      {
+        expiresIn: "1h",
+      }
+    );
 
     return res.status(200).json({ message: "Login successful", token: token });
   } catch (error) {
@@ -505,5 +512,82 @@ exports.deletePage = async (req, res) => {
   } catch (error) {
     console.error("Error deleting page:", error);
     res.status(500).json({ success: false, message: "Internal server error" });
+  }
+};
+
+exports.adminforgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    console.log(req.body);
+    const admin = await Admin.findOne({
+      $or: [{ email: email }],
+    }).select("email");
+
+    console.log(admin);
+
+    if (!admin) {
+      return res.status(404).json({
+        message: "Admin not found. Please check your email or mobile number.",
+      });
+    }
+
+    let resp = await sendAdminForgetPasswordEmail(admin.email, admin._id);
+
+    if (!resp.success) {
+      return res.status(400).json({
+        message:
+          resp.message || "Failed to send reset link. Please try again later.",
+      });
+    }
+
+    res.status(200).json({
+      message: "Password reset link has been sent to your registered email.",
+    });
+  } catch (error) {
+    console.error("Error in forgotPassword:", error);
+    res
+      .status(500)
+      .json({ message: "Something went wrong. Please try again later." });
+  }
+};
+exports.adminChangePassword = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { newPassword, confirmPassword } = req.body;
+
+    console.log(req.body);
+    const admin = await Admin.findById(userId);
+    if (!admin) {
+      return res
+        .status(400)
+        .json({ success: false, message: "User not found" });
+    }
+
+    console.log(admin);
+    // Compare old password
+    const isMatch = await bcrypt.compare(newPassword, admin.password);
+    if (isMatch) {
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different from the old password",
+      });
+    }
+
+    // Hash and update the new password
+    admin.password = await bcrypt.hash(newPassword, 10);
+    await admin.save();
+    await Tokenschema.findOneAndDelete({ email: admin.email });
+
+    res.status(200).json({
+      success: true,
+      message: "Password reset successful",
+    });
+  } catch (error) {
+    console.error("Error during password reset:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error,
+    });
   }
 };

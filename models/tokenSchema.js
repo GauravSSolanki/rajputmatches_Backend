@@ -25,5 +25,12 @@ const TokenSchema = new mongoose.Schema({
   },
 });
 
-const Token = mongoose.model("Tokenmodel", TokenSchema);
-module.exports = Token;
+const { COLLECTIONS } = require("./collections");
+
+const PasswordResetToken = mongoose.model(
+  "PasswordResetToken",
+  TokenSchema,
+  COLLECTIONS.PASSWORD_RESET_TOKENS
+);
+
+module.exports = PasswordResetToken;

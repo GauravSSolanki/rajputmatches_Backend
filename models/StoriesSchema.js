@@ -25,4 +25,6 @@ const StorySchema = new Schema({
   },
 });
 
-module.exports = mongoose.model("Stories", StorySchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Stories", StorySchema, COLLECTIONS.STORIES);

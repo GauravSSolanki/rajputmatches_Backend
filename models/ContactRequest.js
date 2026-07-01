@@ -30,4 +30,10 @@ const ContactRequestSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.model("ContactRequest", ContactRequestSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "ContactRequest",
+  ContactRequestSchema,
+  COLLECTIONS.CONTACT_REQUESTS
+);

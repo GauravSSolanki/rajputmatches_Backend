@@ -1,5 +1,11 @@
 const express = require("express");
-const ContactRequest = require("../models/ContactRequest.js");
+const {
+  ContactRequest,
+  MediaAlbum: files,
+  MatrimonialUser: User,
+  Story: Stories,
+  ChatMessage: Message,
+} = require("../models");
 const Jimp = require("jimp");
 const mongoose = require("mongoose");
 const {
@@ -71,14 +77,19 @@ const {
   singleFileUpload,
 } = require("../middlewares/middleware.js");
 
+const { validate } = require("../middlewares/validate.js");
+const {
+  updateBasicProfileSchema,
+  saveProfessionalDataSchema,
+  updateReligionDetailsSchema,
+  updateFamilyDetailsSchema,
+  updateExtendedFamilySchema,
+} = require("../validators/profileSchemas.js");
+
 const router = express.Router();
 const fs = require("fs-extra");
 const path = require("path");
 const multer = require("multer");
-const files = require("../models/PhotoSchema.js");
-const User = require("../models/UserProfile.js");
-const Stories = require("../models/StoriesSchema.js");
-const Message = require("../models/Messages.js");
 
 router.get("/profile/view/:id", isAuth, viewDetails);
 router.get("/profile/view/images/:id", isAuth, viewPhotos);
@@ -499,23 +510,47 @@ router.get("/email/verify-email", verifyEmail);
 router.post("/reset-password", isAuth, resetPassword);
 
 router.get("/user", isAuth, getuserData);
-router.put("/update-profile", isAuth, updateBasicdetails);
+router.put(
+  "/update-profile",
+  isAuth,
+  validate(updateBasicProfileSchema),
+  updateBasicdetails
+);
 
 router.get("/get-professional-data", isAuth, getprofessionaldata);
-router.put("/save-professional-data", isAuth, saveprofessionaldata);
+router.put(
+  "/save-professional-data",
+  isAuth,
+  validate(saveProfessionalDataSchema),
+  saveprofessionaldata
+);
 
 // Religion details routes
-
 router.get("/get-religiondetails", isAuth, saveRiligionDetails);
-router.put("/update-religiondetails", isAuth, updateRiligionDetails);
+router.put(
+  "/update-religiondetails",
+  isAuth,
+  validate(updateReligionDetailsSchema),
+  updateRiligionDetails
+);
 
 // Family details routes
 router.get("/get-family-details", isAuth, saveFamilyDetails);
-router.put("/update-family-details", isAuth, updateFamilyDetails);
+router.put(
+  "/update-family-details",
+  isAuth,
+  validate(updateFamilyDetailsSchema),
+  updateFamilyDetails
+);
 
 // Extended family details routes
 router.get("/getpaternal-details", isAuth, saveExtendedFamilyDetails);
-router.put("/updatepaternal-details", isAuth, updateExtendedFamilyDetails);
+router.put(
+  "/updatepaternal-details",
+  isAuth,
+  validate(updateExtendedFamilySchema),
+  updateExtendedFamilyDetails
+);
 
 //
 router.put("/contactus", createContactRequest);
@@ -554,19 +589,6 @@ router.post("/delete/message", isAuth, deleteMessage);
 router.put("/profile/message", isAuth, createOrGetChat);
 router.get("/message/chat", isAuth, getUserChats);
 router.post("/chat/validate", isAuth, chatValidator);
-router.get("/user", isAuth, (req, res) => {
-  try {
-    const userId = req.user.id;
-    if (!userId) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    console.log(userId);
-    res.status(200).json({ userId });
-  } catch (error) {
-    console.log("Error fetching user:", error);
-    res.status(500).json({ error: "Server error" });
-  }
-});
 
 router.get("/terms/:slug", ShareTermsAndPolicy);
 router.get("/", (req, res) => {

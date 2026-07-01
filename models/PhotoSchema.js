@@ -28,4 +28,6 @@ PhotoSchema.pre("save", function (next) {
   }
 });
 
-module.exports = mongoose.model("Photo", PhotoSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Photo", PhotoSchema, COLLECTIONS.MEDIA_ALBUMS);

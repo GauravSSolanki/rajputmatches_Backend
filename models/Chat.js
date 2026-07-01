@@ -34,4 +34,6 @@ const ChatSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Chat", ChatSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Chat", ChatSchema, COLLECTIONS.CHATS);

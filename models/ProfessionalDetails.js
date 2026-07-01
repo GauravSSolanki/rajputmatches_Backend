@@ -12,7 +12,10 @@ const ProfessionalDetailsSchema = new Schema({
   class: { type: String, trim: true },
 });
 
+const { COLLECTIONS } = require("./collections");
+
 module.exports = mongoose.model(
   "ProfessionalDetails",
-  ProfessionalDetailsSchema
+  ProfessionalDetailsSchema,
+  COLLECTIONS.PROFESSIONAL_PROFILES
 );

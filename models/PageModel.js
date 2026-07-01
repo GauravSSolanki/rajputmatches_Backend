@@ -9,4 +9,6 @@ const pageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Page", pageSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Page", pageSchema, COLLECTIONS.CMS_PAGES);

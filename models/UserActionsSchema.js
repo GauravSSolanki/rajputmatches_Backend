@@ -32,4 +32,10 @@ const UserActionsSchema = new Schema({
  
 });
 
-module.exports = mongoose.model('UserActions', UserActionsSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "UserActions",
+  UserActionsSchema,
+  COLLECTIONS.USER_ACTIONS
+);

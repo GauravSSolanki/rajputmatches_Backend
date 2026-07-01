@@ -1,22 +1,37 @@
-const User = require("../models/UserProfile.js");
-const HoroscopeDetails = require("../models/HoroscopeDetails");
-const FamilyDetails = require("../models/FamilyDetails");
-const ProfessionalDetails = require("../models/ProfessionalDetails");
-const ExtendedFamily = require("../models/ExtendedFamilyDetails.js");
+const {
+  MatrimonialUser: User,
+  HoroscopeProfile: HoroscopeDetails,
+  FamilyProfile: FamilyDetails,
+  ProfessionalProfile: ProfessionalDetails,
+  ExtendedFamilyProfile: ExtendedFamily,
+  PhotoAccessRequest: PhotoRequest,
+  ConnectionRequest: ProfileConnectionRequest,
+  Shortlist,
+  Notification,
+  SubscriptionLimit: Limit,
+  CmsPage: Page,
+  MediaAlbum: files,
+  Story: Stories,
+  VerifiedEmail,
+  ContactRequest,
+  EmailVerificationToken,
+  ChatMessage: Message,
+  Chat,
+  PasswordResetToken: Tokenschema,
+} = require("../models");
 const { ProfileView, VisitedProfile } = require("../models/profileView.js");
-const Notification = require("../models/NotificationSchema.js");
-const Limit = require("../models/LimitSchema.js");
-
-const Page = require("../models/PageModel.js");
-
-const files = require("../models/PhotoSchema.js");
-const Stories = require("../models/StoriesSchema.js");
-const VerifiedEmail = require("../models/VerifiedEmailSchema.js");
-const ContactRequest = require("../models/ContactRequest.js");
-const EmailVerificationToken = require("../models/EmailVerifySchema.js");
-
-const Message = require("../models/Messages.js");
-const Chat = require("../models/Chat.js");
+const profileInteraction = require("../services/profileInteractionService.js");
+const profileDetails = require("../services/profileDetailsService.js");
+const {
+  getAcceptedPhotoOwnerIdsForRequester,
+  hasAcceptedPhotoAccess,
+  hasAcceptedConnection,
+  hasActiveConnection,
+  enrichProfileForViewer,
+  filterFilesForViewer,
+  isProfileLocked,
+  applyLockedProfileVisibility,
+} = require("../utils/profileAccess.js");
 const { validationResult } = require("express-validator");
 const bcrypt = require("bcrypt");
 const {
@@ -25,7 +40,6 @@ const {
   sendVerificationEmail,
 } = require("../middlewares/middleware.js");
 
-const Tokenschema = require("../models/tokenSchema.js");
 const { generateToken, getNextMatrimonyId } = require("../utils/utility.js");
 const express = require("express");
 const mongoose = require("mongoose");
@@ -297,25 +311,37 @@ exports.resetPassword = async (req, res) => {
     const userId = req.user.id;
     const { password, newPassword } = req.body;
 
-    console.log(req.body);
     const user = await User.findById(userId);
     if (!user) {
-      return res
-        .status(400)
-        .json({ success: false, message: "User not found" });
+      return res.status(400).json({
+        success: false,
+        message: "User not found",
+      });
     }
 
-    console.log(user);
-    // Compare old password
-    const isMatch = await bcrypt.compare(newPassword, user.password);
-    if (isMatch) {
+    const tokenEntry = await Tokenschema.findOne({ email: user.email });
+    if (!tokenEntry) {
+      return res.status(400).json({
+        success: false,
+        message: "Token expired or password already changed",
+      });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({
+        success: false,
+        message: "Old password is incorrect",
+      });
+    }
+
+    if (password === newPassword) {
       return res.status(400).json({
         success: false,
         message: "New password must be different from the old password",
       });
     }
 
-    // Hash and update the new password
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
     await Tokenschema.findOneAndDelete({ email: user.email });
@@ -334,65 +360,23 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
+
 exports.getshortlistedData = async (req, res) => {
   try {
     const userId = req.user.id;
-    const user = await User.findById(userId)
-      .select("shortlisted photoReqSent")
-      .populate([
-        {
-          path: "shortlisted.profile",
-          select: "middleName lastName height dateOfBirth gender martrId",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-        {
-          path: "photoReqSent.userId",
-          select: "status",
-        },
-      ])
-      .lean(); // Ensures better performance
+    const user = await User.findById(userId).select("_id").lean();
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Extract photoReqSent for quick lookup
-    const acceptedPhotoReqs = new Set(
-      user.photoReqSent
-        ?.filter((req) => req.status === "accepted")
-        .map((req) => req.userId.toString())
+    const shortlistData = await profileInteraction.formatShortlistResponse(
+      userId
     );
-
-    // Modify shortlisted profiles while keeping structure same
-    user.shortlisted = user.shortlisted.map((entry) => {
-      if (!entry.profile || !entry.profile.filesId) return entry; // Return unchanged if no filesId exists
-
-      const { filesId } = entry.profile;
-      const isAccepted = acceptedPhotoReqs.has(entry.profile.toString());
-
-      return {
-        ...entry, // Keep the original structure intact
-        profile: {
-          ...entry.profile,
-          filesId: {
-            ...filesId,
-            photos:
-              !filesId.isPrivate || isAccepted
-                ? filesId.photos.filter((photo) => photo.isAvatar)
-                : [], // If private and not accepted, send an empty array
-          },
-        },
-      };
-    });
 
     return res.status(200).json({
       message: "Shortlisted profiles fetched successfully.",
-      user,
+      user: { _id: user._id, ...shortlistData },
     });
   } catch (error) {
     console.error("Error fetching shortlisted data:", error);
@@ -403,76 +387,19 @@ exports.getshortlistedData = async (req, res) => {
 exports.getviewedData = async (req, res) => {
   try {
     const userId = req.user.id;
-
-    const user = await User.findById(userId)
-      .select("visitedAt photoReqSent")
-      .populate([
-        {
-          path: "visitedAt",
-          select:
-            "firstName lastName height gender dateOfBirth HoroscopicId filesId profdetailsId address familydetailsId martrId photoReqReceived",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-        {
-          path: "photoReqSent.userId",
-          select: "status",
-        },
-      ])
-      .lean();
+    const user = await User.findById(userId).select("_id").lean();
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    console.log("Visited Data Before Processing:", user.visitedAt);
-
-    const acceptedPhotoReqs = new Set(
-      user.photoReqSent
-        .filter((req) => req.status === "accepted")
-        .map((req) => req.userId.toString())
+    const visitedIds = await profileInteraction.getVisitedProfileIds(userId);
+    const visitedAt = await profileInteraction.populateProfilesForViewer(
+      visitedIds,
+      userId
     );
 
-    user.visitedAt = user.visitedAt.map((profile) => {
-      const isAccepted = acceptedPhotoReqs.has(profile._id.toString());
-
-      const hasReceivedPhotoRequest = profile.photoReqReceived?.some(
-        (req) => req.userId.toString() === userId && req.status === "accepted"
-      );
-
-      let filteredPhotos = [];
-
-      if (profile.filesId) {
-        if (
-          !profile.filesId.isPrivate ||
-          isAccepted ||
-          hasReceivedPhotoRequest
-        ) {
-          filteredPhotos = profile.filesId.photos.filter(
-            (photo) => photo.isAvatar === true
-          );
-        }
-      }
-
-      return {
-        ...profile,
-        HoroscopicId: profile.HoroscopicId || {},
-        profdetailsId: profile.profdetailsId || {},
-        familydetailsId: profile.familydetailsId || {},
-        filesId: {
-          ...profile.filesId,
-          photos: filteredPhotos,
-        },
-      };
-    });
-
-    console.log("Visited Data After Processing:", user.visitedAt);
-
-    return res.status(200).json({ user });
+    return res.status(200).json({ user: { _id: user._id, visitedAt } });
   } catch (error) {
     console.error("Error fetching viewed data:", error);
     return res.status(500).json({ message: "Server error", error });
@@ -482,72 +409,19 @@ exports.getviewedData = async (req, res) => {
 exports.getvisitedData = async (req, res) => {
   try {
     const userId = req.user.id;
-
-    // Fetch user and apply full population
-    const user = await User.findById(userId)
-      .select("viewedBy photoReqReceived photoReqSent")
-      .populate([
-        {
-          path: "viewedBy",
-          select:
-            "firstName lastName height gender dateOfBirth HoroscopicId filesId profdetailsId address familydetailsId martrId photoReqReceived",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-        {
-          path: "photoReqSent.userId",
-          select: "status",
-        },
-      ])
-      .lean(); // Converts Mongoose document to plain JS object
+    const user = await User.findById(userId).select("_id").lean();
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Extract accepted photo requests
-    const acceptedPhotoReqs = new Set(
-      user.photoReqSent
-        .filter((req) => req.status === "accepted")
-        .map((req) => req.userId.toString())
+    const visitorIds = await profileInteraction.getVisitorProfileIds(userId);
+    const viewedBy = await profileInteraction.populateProfilesForViewer(
+      visitorIds,
+      userId
     );
 
-    // Modify the `viewedBy` array
-    user.viewedBy = user.viewedBy.map((profile) => {
-      const isAccepted = acceptedPhotoReqs.has(profile._id.toString());
-
-      // Check if current user's ID is in profile's photoReqReceived and accepted
-      const hasReceivedPhotoRequest = profile.photoReqReceived?.some(
-        (req) => req.userId.toString() === userId && req.status === "accepted"
-      );
-
-      let profileData = JSON.parse(JSON.stringify(profile)); // Ensure deep cloning
-
-      if (profileData.filesId) {
-        if (
-          !profileData.filesId.isPrivate ||
-          isAccepted ||
-          hasReceivedPhotoRequest
-        ) {
-          // If files are public, request was accepted, or user received an accepted photo request, show avatar photos
-          profileData.filesId.photos = profileData.filesId.photos.filter(
-            (photo) => photo.isAvatar === true
-          );
-        } else {
-          // Files are private and not accepted
-          profileData.filesId.photos = [];
-        }
-      }
-
-      return profileData;
-    });
-
-    console.log("Processed viewedBy data:", user.viewedBy);
-    return res.status(200).json({ user });
+    return res.status(200).json({ user: { _id: user._id, viewedBy } });
   } catch (error) {
     console.error("Error fetching viewed data:", error);
     return res.status(500).json({ message: "Server error", error });
@@ -559,25 +433,18 @@ exports.deleteShortlistedProfile = async (req, res) => {
     const userId = req.user.id;
     const profileId = req.body.data;
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Filter out the profile to be deleted
-    const initialLength = user.shortlisted?.length;
-
-    user.shortlisted = user.shortlisted.filter(
-      (shortlisted) => shortlisted.profile.toString() !== profileId
+    const deleted = await profileInteraction.removeFromShortlist(
+      userId,
+      profileId
     );
 
-    // Check if anything was removed
-    if (user.shortlisted.length === initialLength) {
+    if (!deleted) {
       return res
         .status(404)
         .json({ message: "Profile not found in the shortlist" });
     }
-    await user.save();
+
+    const user = await User.findById(userId);
     res
       .status(200)
       .json({ message: "Profile removed from shortlist successfully", user });
@@ -601,30 +468,19 @@ exports.profilebookmark = async (req, res) => {
         .json({ message: "Bad request: Profile ID is required" });
     }
 
-    const user = await User.findById(userId).select("shortlisted");
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if (!Array.isArray(user.shortlisted)) {
-      user.shortlisted = [];
-    }
-
-    const shortlistedProfile = user.shortlisted.find(
-      (item) => item.profile.toString() === profileId
+    const entry = await profileInteraction.toggleShortlistBookmark(
+      userId,
+      profileId
     );
-
-    if (shortlistedProfile) {
-      shortlistedProfile.isbookmarked = !shortlistedProfile.isbookmarked;
-    } else {
-      user.shortlisted.push({ profile: profileId, isbookmarked: true });
-    }
-
-    await user.save();
 
     return res.status(200).json({
       message: "Bookmark status updated successfully",
-      isbookmarked: shortlistedProfile ? shortlistedProfile.isbookmarked : true,
+      isbookmarked: entry.isbookmarked,
       user,
     });
   } catch (error) {
@@ -660,7 +516,7 @@ exports.sendRequest = async (req, res) => {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    const limit = await Limit.find();
+    const limit = await Limit.findOne();
     if (!limit) {
       return res.status(500).json({ message: "Limit configuration not found" });
     }
@@ -669,20 +525,16 @@ exports.sendRequest = async (req, res) => {
       return res.status(403).json({ message: "Free request limit exceeded" });
     }
 
-    // Add request to the profile if not already sent
-    if (!profile.reqReceived.some((req) => req.userId.equals(userId))) {
-      profile.reqReceived.push({ userId: userId, status: "pending" });
+    const existing = await ProfileConnectionRequest.findOne({
+      requesterId: userId,
+      receiverId: profileId,
+    });
+
+    if (!existing) {
+      await profileInteraction.createConnectionRequest(userId, profileId);
+      user.reqSentCount++;
+      await user.save();
     }
-
-    if (!user.reqSent.some((req) => req.userId.equals(profileId))) {
-      user.reqSent.push({ userId: profileId, status: "pending" });
-    }
-
-    // Increment the user's sent request count
-    user.reqSentCount++;
-
-    await user.save();
-    await profile.save();
 
     return res.status(200).json({ message: "Request sent successfully" });
   } catch (error) {
@@ -706,13 +558,11 @@ exports.sendphotoRequest = async (req, res) => {
         .json({ message: "You cannot send a request to yourself." });
     }
 
-    const user = await User.findById(userId)
-      .select("photoReqSent filesId")
-      .populate("filesId", "isPrivate photos");
-
-    const profile = await User.findById(profileId)
-      .select("photoReqReceived filesId")
-      .populate("filesId", "isPrivate photos");
+    const user = await User.findById(userId).populate("filesId", "isPrivate photos");
+    const profile = await User.findById(profileId).populate(
+      "filesId",
+      "isPrivate photos"
+    );
 
     if (!user) {
       return res.status(404).json({ message: "User not found." });
@@ -726,31 +576,8 @@ exports.sendphotoRequest = async (req, res) => {
         .status(400)
         .json({ message: "The selected user has no photos available." });
     }
-    user.photoReqSent = user.photoReqSent || [];
-    profile.photoReqReceived = profile.photoReqReceived || [];
-    const isValidObjectId = (id) =>
-      id && id.toString().match(/^[0-9a-fA-F]{24}$/);
 
-    if (!isValidObjectId(userId) || !isValidObjectId(profileId)) {
-      return res.status(400).json({ message: "Invalid user or profile ID." });
-    }
-
-    const hasSentRequest = user.photoReqSent.some(
-      (req) => req.userId?.toString() === profileId.toString()
-    );
-    const hasReceivedRequest = profile.photoReqReceived.some(
-      (req) => req.userId?.toString() === userId.toString()
-    );
-
-    if (!hasSentRequest) {
-      user.photoReqSent.push({ userId: profileId, status: "pending" });
-    }
-    if (!hasReceivedRequest) {
-      profile.photoReqReceived.push({ userId: userId, status: "pending" });
-    }
-
-    await user.save();
-    await profile.save();
+    await profileInteraction.createPhotoRequest(userId, profileId);
 
     return res.status(200).json({ message: "Request sent successfully." });
   } catch (error) {
@@ -768,22 +595,13 @@ exports.withdrawal = async (req, res) => {
   }
 
   try {
-    // Perform atomic deletion using MongoDB $pull
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.findByIdAndUpdate(
-        userId,
-        { $pull: { photoReqSent: { userId: profileId } } },
-        { new: true }
-      ),
-      User.findByIdAndUpdate(
-        profileId,
-        { $pull: { photoReqReceived: { userId: userId } } },
-        { new: true }
-      ),
-    ]);
+    const deleted = await profileInteraction.deletePhotoRequest(
+      userId,
+      profileId
+    );
 
-    if (!userUpdate || !profileUpdate) {
-      return res.status(404).json({ message: "User or Profile not found" });
+    if (!deleted) {
+      return res.status(404).json({ message: "Photo request not found" });
     }
 
     return res.status(200).json({ message: "Request withdrawn successfully" });
@@ -802,57 +620,25 @@ exports.acceptRequest = async (req, res) => {
       return res.status(400).json({ message: "Profile ID is required" });
     }
 
-    // Convert to ObjectId if needed
-    const userObjectId = new mongoose.Types.ObjectId(userId);
-    const profileObjectId = new mongoose.Types.ObjectId(profileId);
-
-    // Check if the request exists in both users' lists
-    const userExists = await User.findById({
-      _id: userObjectId,
-      "photoReqReceived.userId": profileObjectId,
+    const request = await PhotoRequest.findOne({
+      requesterId: profileId,
+      ownerId: userId,
+      status: "pending",
     });
 
-    const profileExists = await User.findById({
-      _id: profileObjectId,
-      "photoReqSent.userId": userObjectId,
-    });
-
-    console.log(userExists);
-    console.log(profileExists);
-
-    if (!userExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in sent list" });
+    if (!request) {
+      return res.status(404).json({ message: "Photo request not found" });
     }
 
-    if (!profileExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in received list" });
-    }
+    await profileInteraction.updatePhotoRequestStatus(
+      userId,
+      profileId,
+      "accepted"
+    );
 
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.updateOne(
-        { _id: userObjectId, "photoReqReceived.userId": profileObjectId },
-        { $set: { "photoReqReceived.$.status": "accepted" } }
-      ),
-      User.updateOne(
-        { _id: profileObjectId, "photoReqSent.userId": userObjectId },
-        { $set: { "photoReqSent.$.status": "accepted" } }
-      ),
-    ]);
-
-    // console.log(userUpdate);
-    // console.log(profileUpdate);
-
-    if (userUpdate.modifiedCount === 0 || profileUpdate.modifiedCount === 0) {
-      return res.status(500).json({ message: "Failed to update status" });
-    }
-
-    return res.status(200).json({ message: "Request rejected successfully" });
+    return res.status(200).json({ message: "Request accepted successfully" });
   } catch (error) {
-    console.error("Error rejecting request:", error);
+    console.error("Error accepting request:", error);
     return res.status(500).json({ message: "Server error", error });
   }
 };
@@ -866,53 +652,20 @@ exports.rejectRequest = async (req, res) => {
       return res.status(400).json({ message: "Profile ID is required" });
     }
 
-    // Convert to ObjectId if needed
-    const userObjectId = new mongoose.Types.ObjectId(userId);
-    const profileObjectId = new mongoose.Types.ObjectId(profileId);
-
-    // Check if the request exists in both users' lists
-    const userExists = await User.findById({
-      _id: userObjectId,
-      "photoReqReceived.userId": profileObjectId,
+    const request = await PhotoRequest.findOne({
+      requesterId: profileId,
+      ownerId: userId,
     });
 
-    const profileExists = await User.findById({
-      _id: profileObjectId,
-      "photoReqSent.userId": userObjectId,
-    });
-
-    console.log(userExists);
-    console.log(profileExists);
-
-    if (!userExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in sent list" });
+    if (!request) {
+      return res.status(404).json({ message: "Photo request not found" });
     }
 
-    if (!profileExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in received list" });
-    }
-
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.updateOne(
-        { _id: userObjectId, "photoReqReceived.userId": profileObjectId },
-        { $set: { "photoReqReceived.$.status": "rejected" } }
-      ),
-      User.updateOne(
-        { _id: profileObjectId, "photoReqSent.userId": userObjectId },
-        { $set: { "photoReqSent.$.status": "rejected" } }
-      ),
-    ]);
-
-    // console.log(userUpdate);
-    // console.log(profileUpdate);
-
-    if (userUpdate.modifiedCount === 0 || profileUpdate.modifiedCount === 0) {
-      return res.status(500).json({ message: "Failed to update status" });
-    }
+    await profileInteraction.updatePhotoRequestStatus(
+      userId,
+      profileId,
+      "rejected"
+    );
 
     return res.status(200).json({ message: "Request rejected successfully" });
   } catch (error) {
@@ -930,22 +683,13 @@ exports.reqwithdrawal = async (req, res) => {
   }
 
   try {
-    // Perform atomic deletion using MongoDB $pull
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.findByIdAndUpdate(
-        userId,
-        { $pull: { reqSent: { userId: profileId } } },
-        { new: true }
-      ),
-      User.findByIdAndUpdate(
-        profileId,
-        { $pull: { reqReceived: { userId: userId } } },
-        { new: true }
-      ),
-    ]);
+    const deleted = await profileInteraction.deleteConnectionRequest(
+      userId,
+      profileId
+    );
 
-    if (!userUpdate || !profileUpdate) {
-      return res.status(404).json({ message: "User or Profile not found" });
+    if (!deleted) {
+      return res.status(404).json({ message: "Connection request not found" });
     }
 
     return res.status(200).json({ message: "Request withdrawn successfully" });
@@ -964,57 +708,25 @@ exports.reqacceptRequest = async (req, res) => {
       return res.status(400).json({ message: "Profile ID is required" });
     }
 
-    // Convert to ObjectId if needed
-    const userObjectId = new mongoose.Types.ObjectId(userId);
-    const profileObjectId = new mongoose.Types.ObjectId(profileId);
-
-    // Check if the request exists in both users' lists
-    const userExists = await User.findById({
-      _id: userObjectId,
-      "reqReceived.userId": profileObjectId,
+    const request = await ProfileConnectionRequest.findOne({
+      requesterId: profileId,
+      receiverId: userId,
+      status: "pending",
     });
 
-    const profileExists = await User.findById({
-      _id: profileObjectId,
-      "reqSent.userId": userObjectId,
-    });
-
-    console.log(userExists);
-    console.log(profileExists);
-
-    if (!userExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in sent list" });
+    if (!request) {
+      return res.status(404).json({ message: "Connection request not found" });
     }
 
-    if (!profileExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in received list" });
-    }
+    await profileInteraction.updateConnectionRequestStatus(
+      userId,
+      profileId,
+      "accepted"
+    );
 
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.updateOne(
-        { _id: userObjectId, "reqReceived.userId": profileObjectId },
-        { $set: { "reqReceived.$.status": "accepted" } }
-      ),
-      User.updateOne(
-        { _id: profileObjectId, "reqSent.userId": userObjectId },
-        { $set: { "reqSent.$.status": "accepted" } }
-      ),
-    ]);
-
-    // console.log(userUpdate);
-    // console.log(profileUpdate);
-
-    if (userUpdate.modifiedCount === 0 || profileUpdate.modifiedCount === 0) {
-      return res.status(500).json({ message: "Failed to update status" });
-    }
-
-    return res.status(200).json({ message: "Request rejected successfully" });
+    return res.status(200).json({ message: "Request accepted successfully" });
   } catch (error) {
-    console.error("Error rejecting request:", error);
+    console.error("Error accepting request:", error);
     return res.status(500).json({ message: "Server error", error });
   }
 };
@@ -1028,53 +740,20 @@ exports.reqrejectRequest = async (req, res) => {
       return res.status(400).json({ message: "Profile ID is required" });
     }
 
-    // Convert to ObjectId if needed
-    const userObjectId = new mongoose.Types.ObjectId(userId);
-    const profileObjectId = new mongoose.Types.ObjectId(profileId);
-
-    // Check if the request exists in both users' lists
-    const userExists = await User.findById({
-      _id: userObjectId,
-      "reqReceived.userId": profileObjectId,
+    const request = await ProfileConnectionRequest.findOne({
+      requesterId: profileId,
+      receiverId: userId,
     });
 
-    const profileExists = await User.findById({
-      _id: profileObjectId,
-      "reqSent.userId": userObjectId,
-    });
-
-    console.log(userExists.reqReceived);
-    console.log(profileExists.reqSent);
-
-    if (!userExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in sent list" });
+    if (!request) {
+      return res.status(404).json({ message: "Connection request not found" });
     }
 
-    if (!profileExists) {
-      return res
-        .status(404)
-        .json({ message: "Request not found in received list" });
-    }
-
-    const [userUpdate, profileUpdate] = await Promise.all([
-      User.updateOne(
-        { _id: userObjectId, "reqReceived.userId": profileObjectId },
-        { $set: { "reqReceived.$.status": "rejected" } }
-      ),
-      User.updateOne(
-        { _id: profileObjectId, "reqSent.userId": userObjectId },
-        { $set: { "reqSent.$.status": "rejected" } }
-      ),
-    ]);
-
-    console.log(userUpdate);
-    console.log(profileUpdate);
-
-    if (userUpdate.modifiedCount === 0 || profileUpdate.modifiedCount === 0) {
-      return res.status(500).json({ message: "Failed to update status" });
-    }
+    await profileInteraction.updateConnectionRequestStatus(
+      userId,
+      profileId,
+      "rejected"
+    );
 
     return res.status(200).json({ message: "Request rejected successfully" });
   } catch (error) {
@@ -1087,97 +766,16 @@ exports.getphotoRequests = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const user = await User.findById(userId)
-      .select("photoReqSent photoReqReceived")
-      .populate([
-        {
-          path: "photoReqSent.userId",
-          select:
-            "dateOfBirth gender martrId address HoroscopicId filesId profdetailsId familydetailsId",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-        {
-          path: "photoReqReceived.userId",
-          select:
-            "dateOfBirth gender martrId address HoroscopicId filesId profdetailsId familydetailsId",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-      ])
-      .lean();
-
+    const user = await User.findById(userId).select("_id").lean();
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // **Create a map of accepted photo requests**
-    const photoReqSentMap = new Map(
-      user.photoReqSent
-        .filter((req) => req.status === "accepted")
-        .map((req) => [req.userId.toString(), true])
+    const photoRequests = await profileInteraction.formatPhotoRequestsResponse(
+      userId
     );
 
-    // **Filter `photoReqSent` properly**
-    user.photoReqSent = user.photoReqSent.map((profile) => {
-      const filesId = profile.userId?.filesId;
-      const totalPhotos = filesId?.photos?.length || 0;
-
-      const shouldIncludePhotos =
-        profile.status === "accepted" || filesId?.isPrivate === false;
-
-      const filteredPhotos = shouldIncludePhotos
-        ? filesId.photos.filter((photo) => photo.isAvatar === true)
-        : [];
-
-      return {
-        ...profile,
-        userId: {
-          ...profile.userId,
-          filesId: {
-            ...filesId,
-            photos: filteredPhotos,
-            totalPhotos,
-          },
-        },
-      };
-    });
-
-    // **Filter `photoReqReceived` properly**
-    user.photoReqReceived = user.photoReqReceived.map((profile) => {
-      const filesId = profile.userId?.filesId;
-      const totalPhotos = filesId?.photos?.length || 0;
-
-      const shouldIncludePhotos =
-        photoReqSentMap.has(profile.userId?.toString()) ||
-        filesId?.isPrivate === false;
-
-      const filteredPhotos = shouldIncludePhotos
-        ? filesId.photos.filter((photo) => photo.isAvatar === true)
-        : [];
-
-      return {
-        ...profile,
-        userId: {
-          ...profile.userId,
-          filesId: {
-            ...filesId,
-            photos: filteredPhotos,
-            totalPhotos,
-          },
-        },
-      };
-    });
-
-    return res.status(200).json({ user });
+    return res.status(200).json({ user: { _id: user._id, ...photoRequests } });
   } catch (error) {
     console.error("Error fetching photo requests:", error);
     return res.status(500).json({ message: "Server error", error });
@@ -1188,97 +786,17 @@ exports.getRequests = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const user = await User.findById(userId)
-      .select("reqSent reqReceived photoReqSent photoReqReceived")
-      .populate([
-        {
-          path: "reqSent.userId",
-          select:
-            "dateOfBirth HoroscopicId filesId profdetailsId address familydetailsId martrId gender",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-        {
-          path: "reqReceived.userId",
-          select:
-            "dateOfBirth HoroscopicId filesId profdetailsId address familydetailsId martrId gender",
-          populate: [
-            { path: "HoroscopicId", select: "clan" },
-            { path: "filesId", select: "photos isPrivate" },
-            { path: "profdetailsId", select: "qualifications class" },
-            { path: "familydetailsId", select: "occupation" },
-          ],
-        },
-      ])
-      .lean();
-
+    const user = await User.findById(userId).select("_id").lean();
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const photoReqSentMap = new Map(
-      user.photoReqSent
-        .filter((req) => req.status === "accepted")
-        .map((req) => [req.userId.toString(), true])
-    );
+    const connectionRequests =
+      await profileInteraction.formatConnectionRequestsResponse(userId);
 
-    user.reqSent = user.reqSent.map((profile) => {
-      const totalPhotos = profile.userId.filesId.photos.length;
-      const shouldIncludePhotos =
-        (photoReqSentMap.has(profile.userId._id.toString()) &&
-          profile.status === "accepted") ||
-        profile.userId.filesId.isPrivate === false;
-
-      const filteredPhotos = shouldIncludePhotos
-        ? profile.userId.filesId.photos.filter(
-            (photo) => photo.isAvatar === true
-          )
-        : [];
-
-      return {
-        ...profile,
-        userId: {
-          ...profile.userId,
-          filesId: {
-            ...profile.userId.filesId,
-            photos: filteredPhotos,
-            totalPhotos,
-          },
-        },
-      };
-    });
-
-    user.reqReceived = user.reqReceived.map((profile) => {
-      const totalPhotos = profile.userId.filesId.photos.length;
-      const shouldIncludePhotos =
-        (photoReqSentMap.has(profile.userId._id.toString()) &&
-          profile.status === "accepted") ||
-        profile.userId.filesId.isPrivate === false;
-
-      const filteredPhotos = shouldIncludePhotos
-        ? profile.userId.filesId.photos.filter(
-            (photo) => photo.isAvatar === true
-          )
-        : [];
-
-      return {
-        ...profile,
-        userId: {
-          ...profile.userId,
-          filesId: {
-            ...profile.userId.filesId,
-            photos: filteredPhotos,
-            totalPhotos,
-          },
-        },
-      };
-    });
-
-    return res.status(200).json({ user });
+    return res
+      .status(200)
+      .json({ user: { _id: user._id, ...connectionRequests } });
   } catch (error) {
     console.error("Error fetching requests:", error);
     return res.status(500).json({ message: "Server error", error });
@@ -1290,55 +808,43 @@ exports.viewProfileById = async (req, res) => {
   const profileId = req.body.profileId;
 
   try {
-    const user = await User.findById(userId).select("photoReqSent");
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const acceptedPhotoReqs = new Set(
-      user.photoReqSent
-        .filter((req) => req.status === "accepted")
-        .map((req) => req.userId.toString())
-    );
-
-    const profile = await User.findById(profileId)
-      .select(
-        "firstName lastName height gender dateOfBirth martrId HoroscopicId filesId profdetailsId address familydetailsId"
-      )
-      .populate([
-        { path: "HoroscopicId", select: "clan" },
-        { path: "filesId", select: "photos isPrivate" },
-        { path: "profdetailsId", select: "qualifications class" },
-        { path: "familydetailsId", select: "occupation" },
-      ]);
+    const [photoAccess, connectionAccess, profile] = await Promise.all([
+      hasAcceptedPhotoAccess(userId, profileId),
+      hasAcceptedConnection(userId, profileId),
+      User.findById(profileId)
+        .select(
+          "firstName lastName height gender dateOfBirth martrId HoroscopicId filesId profdetailsId address familydetailsId isVisible"
+        )
+        .populate(profileInteraction.PROFILE_POPULATE),
+    ]);
 
     if (!profile) {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    const isAccepted = acceptedPhotoReqs.has(profile._id.toString());
+    let profileData = profile.toObject();
 
-    if (profile.filesId) {
-      profile.filesId.photos =
-        !profile.filesId.isPrivate || isAccepted ? profile.filesId.photos : [];
+    if (isProfileLocked(profileData) && !connectionAccess) {
+      profileData = applyLockedProfileVisibility(profileData, false);
+    } else {
+      profileData.filesId = filterFilesForViewer(
+        profileData.filesId,
+        photoAccess || !profileData.filesId?.isPrivate
+      );
     }
 
-    console.log("profile", profile);
-    const paternalDetailsData = await ExtendedFamily.find({
-      userId: profile._id,
-    });
+    const paternalDetailsData = connectionAccess
+      ? await ExtendedFamily.find({ userId: profile._id })
+      : [];
 
     const paternaldetails = paternalDetailsData.map(
-      ({ createdAt, updatedAt, _id, userId, ...filteredData }) => filteredData
+      ({ createdAt, updatedAt, _id, userId: _uid, ...filteredData }) =>
+        filteredData
     );
-    console.log("ppppppp", paternaldetails);
-    const profileData = {
-      ...profile.toObject(),
-      paternaldetails: paternaldetails,
-    };
 
-    return res.status(200).json({ profile: profileData });
+    return res.status(200).json({
+      profile: { ...profileData, paternaldetails },
+    });
   } catch (error) {
     console.error("Error fetching profile data:", error);
     return res.status(500).json({ message: "Server error", error });
@@ -1350,27 +856,16 @@ exports.addProfileView = async (req, res) => {
   const profileId = req.body.data;
 
   try {
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
     const profile = await User.findById(profileId);
     if (!profile) {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    if (!profile.viewedBy.some((viewer) => viewer.equals(userId))) {
-      profile.viewedBy.push(userId); // Add the viewer to `viewedBy`
-      profile.view = (profile.view || 0) + 1; // Increment the view counter
+    if (userId === profileId) {
+      return res.status(400).json({ message: "Cannot record self view" });
     }
 
-    if (!user.visitedAt.some((visited) => visited.equals(profileId))) {
-      user.visitedAt.push(profileId);
-    }
-
-    await user.save();
-    await profile.save();
+    await profileInteraction.recordProfileVisit(userId, profileId);
 
     return res.status(200).json({ message: "View recorded successfully" });
   } catch (error) {
@@ -1381,19 +876,20 @@ exports.addProfileView = async (req, res) => {
 exports.getuserData = async (req, res) => {
   try {
     const userId = req.user.id;
-    const user = await User.findById(userId).select("-password");
+    const user = await profileDetails.getUserProfile(userId);
+
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "User not found", success: false });
     }
-    res.status(200).json({ user });
+
+    res.status(200).json({ success: true, user });
   } catch (error) {
     console.error("Error fetching user data:", error);
-    res.status(500).json({ message: "Server error", error });
+    res.status(500).json({ message: "Server error", success: false, error });
   }
 };
 exports.shortlist = async (req, res) => {
   try {
-    console.log(req.body);
     const userId = req.user.id;
     const profileId = req.body.data;
 
@@ -1402,21 +898,14 @@ exports.shortlist = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Check if the profile is already shortlisted
-    const isAlreadyShortlisted = user.shortlisted.some(
-      (shortlisted) => shortlisted.profile.toString() === profileId
-    );
-
-    if (isAlreadyShortlisted) {
+    const existing = await Shortlist.findOne({ userId, profileId });
+    if (existing) {
       return res
         .status(200)
         .json({ message: "Profile already shortlisted", user });
     }
-    // Add the profile to the shortlisted array
-    user.shortlisted.push({
-      profile: new mongoose.Types.ObjectId(profileId),
-    });
-    await user.save();
+
+    await profileInteraction.addToShortlist(userId, profileId);
     res.status(200).json({ message: "Profile shortlisted successfully", user });
   } catch (error) {
     console.error("Error while shortlisting profile:", error);
@@ -1429,35 +918,12 @@ exports.profiledelete = async (req, res) => {
     const userId = req.user.id;
     const profileId = req.body.data;
 
-    console.log(profileId);
-
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const profile = await User.findById(profileId);
-    if (!profile) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(userId) },
-      {
-        $pull: {
-          reqSent: { userId: new mongoose.Types.ObjectId(profileId) },
-        },
-      }
-    );
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(profileId) },
-      {
-        $pull: {
-          reqReceived: { userId: new mongoose.Types.ObjectId(userId) },
-        },
-      }
-    );
+    await profileInteraction.deleteConnectionRequest(userId, profileId);
 
     res.status(200).json({ message: "Profile deleted successfully", user });
   } catch (error) {
@@ -1471,35 +937,12 @@ exports.profilerequestdelete = async (req, res) => {
     const userId = req.user.id;
     const profileId = req.body.data;
 
-    console.log(profileId);
-
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const profile = await User.findById(profileId);
-    if (!profile) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(userId) },
-      {
-        $pull: {
-          photoReqSent: { userId: new mongoose.Types.ObjectId(profileId) },
-        },
-      }
-    );
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(profileId) },
-      {
-        $pull: {
-          photoReqReceived: { userId: new mongoose.Types.ObjectId(userId) },
-        },
-      }
-    );
+    await profileInteraction.deletePhotoRequest(userId, profileId);
 
     res.status(200).json({ message: "Profile deleted successfully", user });
   } catch (error) {
@@ -1513,35 +956,12 @@ exports.Removerequest = async (req, res) => {
     const userId = req.user.id;
     const profileId = req.body.data;
 
-    console.log(profileId);
-
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const profile = await User.findById(profileId);
-    if (!profile) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(userId) },
-      {
-        $pull: {
-          reqReceived: { userId: new mongoose.Types.ObjectId(profileId) },
-        },
-      }
-    );
-
-    await User.updateOne(
-      { _id: new mongoose.Types.ObjectId(profileId) },
-      {
-        $pull: {
-          reqSent: { userId: new mongoose.Types.ObjectId(userId) },
-        },
-      }
-    );
+    await profileInteraction.deleteConnectionRequest(profileId, userId);
 
     res.status(200).json({ message: "Profile deleted successfully", user });
   } catch (error) {
@@ -1562,15 +982,18 @@ exports.getprofiles = async (req, res) => {
       HeightFeetfrom,
       HeightFeetto,
       maritalStatus,
-    } = req.body.data;
+    } = req.body?.data ?? {};
 
     console.log(req.body.data);
 
     const user = await User.findById(userId)
-      .select("gender isSubscribed photoReqSent reqSent shortlisted")
+      .select("gender isSubscribed")
       .lean();
 
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    const acceptedPhotoOwnerIds =
+      await getAcceptedPhotoOwnerIdsForRequester(userId);
 
     const query = {
       isVisible: true,
@@ -1668,24 +1091,17 @@ exports.getprofiles = async (req, res) => {
     }
 
     const filterProfiles = profiles.map((profile) => {
-      const isRequested = user.photoReqSent?.some(
-        (req) =>
-          req.userId.toString() === profile._id.toString() &&
-          req.status === "accepted"
-      );
+      const photoAccess = acceptedPhotoOwnerIds.has(profile._id.toString());
 
       if (profile.filesId && profile.filesId.photos) {
-        const { isPrivate, photos } = profile.filesId;
-        const totalPhotos = profile?.filesId?.photos?.length || 0;
+        const filesId = filterFilesForViewer(profile.filesId, photoAccess, {
+          avatarOnly: true,
+        });
         return {
           ...profile,
           filesId: {
-            totalPhotos,
-            photos: isPrivate
-              ? isRequested
-                ? photos.filter((p) => p.isAvatar)
-                : []
-              : photos.filter((p) => p.isAvatar),
+            totalPhotos: filesId.totalPhotos,
+            photos: filesId.photos,
           },
         };
       }
@@ -1705,374 +1121,186 @@ exports.getprofiles = async (req, res) => {
 exports.getprofessionaldata = async (req, res) => {
   try {
     const userId = req.user.id;
-    let user = await ProfessionalDetails.findOne({
-      userId: new mongoose.Types.ObjectId(userId),
+    const { doc, created } = await profileDetails.getProfessionalDetails(userId);
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      message: created ? "Professional profile created" : "Professional profile fetched",
+      user: doc,
     });
-    console.log(user);
-    if (!user) {
-      user = await ProfessionalDetails.create({
-        userId: new mongoose.Types.ObjectId(userId),
-      });
-      const userRecord = await User.findById(userId);
-      userRecord.profdetailsId = user._id;
-      await userRecord.save();
-      await user.save();
-
-      return res.status(201).json({ message: "User created", user });
-    }
-
-    res.status(200).json({ user });
   } catch (error) {
-    console.error("Error fetching user data:", error);
-    res.status(500).json({ message: "Server error", error });
+    console.error("Error fetching professional data:", error);
+    res.status(500).json({ message: "Server error", success: false, error });
   }
 };
+
 exports.saveprofessionaldata = async (req, res) => {
   try {
     const userId = req.user.id;
-    const updateData = req.body.data;
-    // console.log(updateData);
-    // console.log(userId);
+    const updateData = req.validated?.data ?? req.body.data;
 
-    if (!updateData) {
-      return res
-        .status(400)
-        .json({ message: "Missing updateData in request body." });
-    }
-
-    console.log("Update data received:", updateData);
-
-    const updatedProfile = await ProfessionalDetails.findOneAndUpdate(
-      { userId: new mongoose.Types.ObjectId(userId) },
-      updateData,
-      {
-        new: true,
-        runValidators: true,
-      }
+    const updatedProfile = await profileDetails.saveProfessionalDetails(
+      userId,
+      updateData
     );
 
-    // const updatedProfile = await ProfessionalDetails.find({ userId: userId });
-
-    console.log("Update:", updatedProfile);
-
-    if (!updatedProfile) {
-      return res.status(404).json({ message: "User not found." });
-    }
-
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully.",
       data: updatedProfile,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return res
-        .status(400)
-        .json({ message: "Malformed JSON in request body." });
-    }
-
-    console.error("Error updating profile:", error);
-    res
-      .status(500)
-      .json({ message: "An error occurred while updating the profile." });
+    console.error("Error updating professional profile:", error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "An error occurred while updating the profile.",
+    });
   }
 };
+
 exports.updateBasicdetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    const updateData = req.body.data;
+    const updateData = req.validated?.data ?? req.body.data;
 
-    if (!updateData) {
-      return res
-        .status(400)
-        .json({ message: "Missing updateData in request body." });
-    }
-
-    console.log("Update data received:", updateData);
-
-    // Validate height fields
-    if (updateData.height) {
-      const { feet, inches } = updateData.height;
-
-      if (
-        (feet && typeof feet !== "number") ||
-        (inches && typeof inches !== "number")
-      ) {
-        return res.status(400).json({
-          message: "Height must contain numeric values for feet and inches.",
-        });
-      }
-    }
-
-    // Validate maritalStatus
-    if (
-      updateData.maritalStatus &&
-      !["Single", "Married", "Divorced", "Widowed"].includes(
-        updateData.maritalStatus
-      )
-    ) {
-      return res.status(400).json({ message: "Invalid marital status." });
-    }
-
-    // Update the user profile
-    const updatedProfile = await User.findByIdAndUpdate(userId, updateData, {
-      new: true,
-      runValidators: true,
-    });
-
-    if (!updatedProfile) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    const updatedProfile = await profileDetails.updateBasicProfile(
+      userId,
+      updateData
+    );
 
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully.",
       data: updatedProfile,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return res
-        .status(400)
-        .json({ message: "Malformed JSON in request body." });
-    }
-
     console.error("Error updating profile:", error);
-    res
-      .status(500)
-      .json({ message: "An error occurred while updating the profile." });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "An error occurred while updating the profile.",
+    });
   }
 };
 
 exports.saveRiligionDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    let user = await HoroscopeDetails.findOne({
-      userId: new mongoose.Types.ObjectId(userId),
+    const { doc, created } = await profileDetails.getHoroscopeDetails(userId);
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      message: created ? "Religion details created" : "Religion details fetched",
+      user: doc,
     });
-    console.log(user);
-    if (!user) {
-      user = await HoroscopeDetails.create({
-        userId: new mongoose.Types.ObjectId(userId),
-      });
-
-      const userRecord = await User.findById(userId);
-
-      userRecord.HoroscopicId = user._id;
-      await userRecord.save();
-      await user.save();
-      return res.status(201).json({ message: "User created", user });
-    }
-
-    res.status(200).json({ user });
   } catch (error) {
-    console.error("Error fetching user data:", error);
-    res.status(500).json({ message: "Server error", error });
+    console.error("Error fetching religion details:", error);
+    res.status(500).json({ message: "Server error", success: false, error });
   }
 };
+
 exports.updateRiligionDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    const updateData = req.body.data;
-    if (!updateData) {
-      return res
-        .status(400)
-        .json({ message: "Missing updateData in request body." });
-    }
+    const updateData = req.validated?.data ?? req.body.data;
 
-    console.log("Update data received:", updateData);
-
-    const updatedProfile = await HoroscopeDetails.findOneAndUpdate(
-      { userId: new mongoose.Types.ObjectId(userId) },
-      updateData,
-      {
-        new: true,
-        runValidators: true,
-      }
+    const updatedProfile = await profileDetails.saveHoroscopeDetails(
+      userId,
+      updateData
     );
 
-    if (!updatedProfile) {
-      return res.status(404).json({ message: "User not found." });
-    }
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully.",
       data: updatedProfile,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return res
-        .status(400)
-        .json({ message: "Malformed JSON in request body." });
-    }
-    console.error("Error updating profile:", error);
-    res
-      .status(500)
-      .json({ message: "An error occurred while updating the profile." });
+    console.error("Error updating religion details:", error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "An error occurred while updating the profile.",
+    });
   }
 };
 
 exports.saveFamilyDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    let user = await FamilyDetails.findOne({
-      userId: new mongoose.Types.ObjectId(userId),
+    const { doc, created } = await profileDetails.getFamilyDetailsRecord(userId);
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      message: created ? "Family details created" : "Family details fetched",
+      user: doc,
     });
-
-    if (!user) {
-      user = await FamilyDetails.create({
-        userId: new mongoose.Types.ObjectId(userId),
-      });
-      const userRecord = await User.findById(userId);
-
-      userRecord.familydetailsId = user._id;
-      await userRecord.save();
-      await user.save();
-
-      return res.status(201).json({ message: "User created", user });
-    }
-
-    res.status(200).json({ user });
   } catch (error) {
-    console.error("Error fetching user data:", error);
-    res.status(500).json({ message: "Server error", error });
+    console.error("Error fetching family details:", error);
+    res.status(500).json({ message: "Server error", success: false, error });
   }
 };
+
 exports.updateFamilyDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    const updateData = req.body.data;
+    const updateData = req.validated?.data ?? req.body.data;
 
-    if (!updateData) {
-      return res
-        .status(400)
-        .json({ message: "Missing updateData in request body." });
-    }
-
-    // console.log("Update data received:", updateData);
-    const updatedProfile = await FamilyDetails.findOneAndUpdate(
-      { userId: new mongoose.Types.ObjectId(userId) },
-      updateData,
-      {
-        new: true,
-        runValidators: true,
-      }
+    const updatedProfile = await profileDetails.saveFamilyDetailsRecord(
+      userId,
+      updateData
     );
-    // console.log("Update:", updatedProfile);
-
-    if (!updatedProfile) {
-      return res.status(404).json({ message: "User not found." });
-    }
 
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully.",
       data: updatedProfile,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return res
-        .status(400)
-        .json({ message: "Malformed JSON in request body." });
-    }
-
-    console.error("Error updating profile:", error);
-    res
-      .status(500)
-      .json({ message: "An error occurred while updating the profile." });
+    console.error("Error updating family details:", error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "An error occurred while updating the profile.",
+    });
   }
 };
 
 exports.saveExtendedFamilyDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    let user = await ExtendedFamily.findOne({
-      userId: new mongoose.Types.ObjectId(userId),
+    const { doc, created } = await profileDetails.getExtendedFamilyDetails(userId);
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      message: created
+        ? "Extended family details created"
+        : "Extended family details fetched",
+      user: doc,
     });
-
-    if (!user) {
-      user = await ExtendedFamily.create({
-        userId: new mongoose.Types.ObjectId(userId),
-        grandFatherName: "",
-        grandFathersonOf: "",
-        grandFatheroccupation: "",
-        grandFatherthikana: "",
-        grandMotherName: "",
-        grandMotherdaughterOf: "",
-        grandmotherthikana: "",
-        badePapa: [{ name: "", marriedto: "", daughterof: "", thikana: "" }],
-        kakosa: [{ name: "", marriedto: "", daughterof: "", thikana: "" }],
-        bhuasa: [{ name: "", marriedto: "", sonof: "", thikana: "" }],
-        maternalGrandFatherName: "",
-        maternalGrandFatherthikana: "",
-        maternalGrandFathersonOf: "",
-        maternalGrandFatheroccupation: "",
-        maternalGrandMotherName: "",
-        maternalGrandMotherdaughterOf: "",
-        maternalGrandMotherthikana: "",
-        mamosa: [{ name: "", marriedto: "", daughterof: "", thikana: "" }],
-        masisa: [{ name: "", marriedto: "", sonof: "", thikana: "" }],
-      });
-      return res.status(201).json({ message: "User created", user });
-    }
-
-    res.status(200).json({ user });
   } catch (error) {
-    console.error("Error fetching user data:", error);
-    res.status(500).json({ message: "Server error", error });
+    console.error("Error fetching extended family details:", error);
+    res.status(500).json({ message: "Server error", success: false, error });
   }
 };
 
 exports.updateExtendedFamilyDetails = async (req, res) => {
   try {
     const userId = req.user.id;
-    const updateData = req.body.data;
-    console.log(userId);
+    const updateData = req.validated?.data ?? req.body.data;
 
-    if (!updateData) {
-      return res
-        .status(400)
-        .json({ message: "Missing updateData in request body." });
-    }
-
-    console.log("Update data received:", updateData);
-    let user = await ExtendedFamily.findOne({
-      userId: new mongoose.Types.ObjectId(userId),
-    });
-    Object.keys(updateData).forEach((key) => {
-      if (Array.isArray(updateData[key])) {
-        if (Array.isArray(user[key])) {
-          user[key] = updateData[key];
-        } else {
-          user[key] = updateData[key];
-          console.log(`Created new array key '${key}' in user object.`);
-        }
-      } else {
-        if (!(key in user)) {
-          console.log(`Created new key '${key}' in user object.`);
-        }
-        user[key] = updateData[key];
-      }
-    });
-
-    console.log("Updated User Data:", user);
-    await user.save();
-
-    console.log("Update:", user);
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    const updatedProfile = await profileDetails.saveExtendedFamilyDetails(
+      userId,
+      updateData
+    );
 
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully.",
-      data: user,
+      data: updatedProfile,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return res
-        .status(400)
-        .json({ message: "Malformed JSON in request body." });
-    }
-
-    console.error("Error updating profile:", error);
-    res
-      .status(500)
-      .json({ message: "An error occurred while updating the profile." });
+    console.error("Error updating extended family details:", error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "An error occurred while updating the profile.",
+    });
   }
 };
 
@@ -2458,19 +1686,9 @@ exports.createOrGetChat = async (req, res) => {
       return res.status(404).json({ message: "One or both users not found." });
     }
 
-    const user = await User.findById(user1)
-      .select("reqSent photoReqSent")
-      .lean();
+    const hasConnection = await hasActiveConnection(user1, user2);
 
-    if (!user) {
-      return res.status(404).json({ message: "User1 not found." });
-    }
-
-    const isInReqSent = user.reqSent.some(
-      (req) => req.userId.toString() === user2 && req.status !== "rejected"
-    );
-
-    if (!isInReqSent) {
+    if (!hasConnection) {
       return res
         .status(403)
         .json({ message: "You cannot start a chat with this user." });
@@ -2712,66 +1930,47 @@ exports.viewDetails = async (req, res) => {
       return res.status(400).json({ message: "Profile ID is required" });
     }
 
-    const [user, profile] = await Promise.all([
-      User.findById(userId).select("photoReqSent reqSent"),
+    const [photoAccess, connectionAccess, profile] = await Promise.all([
+      hasAcceptedPhotoAccess(userId, profileId),
+      hasAcceptedConnection(userId, profileId),
       User.findById(profileId)
         .populate("filesId")
         .populate("HoroscopicId")
         .populate("profdetailsId"),
     ]);
 
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
     if (!profile) {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    const isPhotoReqSent =
-      Array.isArray(user.photoReqSent) &&
-      user.photoReqSent.some(
-        (req) =>
-          req.userId.toString() === profileId && req.status === "accepted"
-      );
-
-    const isReqSent =
-      Array.isArray(user.reqSent) &&
-      user.reqSent.some(
-        (req) =>
-          req.userId.toString() === profileId && req.status === "accepted"
-      );
-
-    console.log("isPhotoReqSent:", isPhotoReqSent);
-    console.log("isReqSent:", isReqSent);
-
-    // Ensure filesId exists before accessing its properties
-    profile.filesId = profile.filesId || { photos: [], isPrivate: false };
-
-    profile.filesId.photos =
-      (profile.filesId.photos.length !== 0 && !profile.filesId.isPrivate) ||
-      (profile.filesId.isPrivate && isPhotoReqSent)
-        ? profile.filesId.photos
-        : [];
-
     let userResponse = profile.toObject();
-
-    // Mask mobile and email
     userResponse.mobile = maskMobile(profile.mobile);
     userResponse.email = maskEmail(profile.email);
 
-    if (isReqSent) {
-      const [paternaldetails, familyDetails] = await Promise.all([
-        ExtendedFamily.findOne({ userId: profileId }),
-        User.findById(profileId)
-          .populate("familydetailsId")
-          .then((user) => user?.familydetailsId),
-      ]);
+    if (isProfileLocked(userResponse) && !connectionAccess) {
+      userResponse = applyLockedProfileVisibility(userResponse, false);
+    } else {
+      userResponse.filesId = userResponse.filesId || {
+        photos: [],
+        isPrivate: false,
+      };
+      userResponse.filesId = filterFilesForViewer(
+        userResponse.filesId,
+        photoAccess || !userResponse.filesId.isPrivate
+      );
 
-      userResponse.paternaldetails = paternaldetails;
-      userResponse.familyDetails = familyDetails;
+      if (connectionAccess) {
+        const [paternaldetails, familyDetails] = await Promise.all([
+          ExtendedFamily.findOne({ userId: profileId }),
+          User.findById(profileId)
+            .populate("familydetailsId")
+            .then((u) => u?.familydetailsId),
+        ]);
+
+        userResponse.paternaldetails = paternaldetails;
+        userResponse.familyDetails = familyDetails;
+      }
     }
-
-    console.log(userResponse);
 
     res.status(200).json({ user: userResponse });
   } catch (error) {
@@ -2787,35 +1986,28 @@ exports.viewPhotos = async (req, res) => {
     if (!profileId) {
       return res.status(400).json({ message: "Profile ID is required" });
     }
-    const user = await User.findById(userId).select("photoReqSent");
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-    const isPhotoReqSent = user.photoReqSent.some(
-      (req) => req.userId.toString() === profileId && req.status == "accepted"
-    );
 
-    console.log(isPhotoReqSent);
-
-    const profile = await User.findById(profileId)
-      .populate("filesId")
-      .populate("HoroscopicId")
-      .populate("profdetailsId")
-      .populate("familydetailsId");
+    const [photoAccess, profile] = await Promise.all([
+      hasAcceptedPhotoAccess(userId, profileId),
+      User.findById(profileId)
+        .populate("filesId")
+        .populate("HoroscopicId")
+        .populate("profdetailsId")
+        .populate("familydetailsId"),
+    ]);
 
     if (!profile) {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    profile.filesId.photos =
-      (profile.filesId.photos.length !== 0 && !profile.filesId.isPrivate) ||
-      (profile.filesId.isPrivate && isPhotoReqSent)
-        ? profile.filesId.photos.slice(0, 2) // Send only first 2 images
-        : [];
-
     let userResponse = profile.toObject();
+    userResponse.filesId = userResponse.filesId || { photos: [], isPrivate: false };
+    userResponse.filesId = filterFilesForViewer(
+      userResponse.filesId,
+      photoAccess || !userResponse.filesId.isPrivate,
+      { limit: 2 }
+    );
 
-    // Mask mobile and email
     userResponse.mobile = maskMobile(profile.mobile);
     userResponse.email = maskEmail(profile.email);
     delete userResponse.firstName;

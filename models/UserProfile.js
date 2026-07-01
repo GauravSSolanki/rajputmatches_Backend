@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
 const UserProfileSchema = new Schema({
-  isVisible: { type: Boolean, default: "true" },
+  isVisible: { type: Boolean, default: true },
   isbloacked: { type: Boolean, default: "false" },
   isApproved: { type: Boolean, default: "false" },
   avatar: { type: String },
@@ -66,36 +66,6 @@ const UserProfileSchema = new Schema({
     zipCode: { type: String, default: "" },
   },
 
-  visitedAt: [
-    {
-      type: Schema.Types.ObjectId,
-      ref: "UserProfile",
-    },
-  ],
-  viewedBy: [
-    {
-      type: Schema.Types.ObjectId,
-      ref: "UserProfile",
-    },
-  ],
-
-  shortlisted: [
-    {
-      profile: {
-        type: Schema.Types.ObjectId,
-        ref: "UserProfile",
-      },
-      isbookmarked: {
-        type: Boolean,
-        default: false,
-      },
-      dateShortlisted: {
-        type: Date,
-        default: Date.now,
-      },
-    },
-  ],
-
   filesId: { type: Schema.Types.ObjectId, ref: "Photo" },
   HoroscopicId: { type: Schema.Types.ObjectId, ref: "HoroscopeDetails" },
   profdetailsId: {
@@ -107,61 +77,12 @@ const UserProfileSchema = new Schema({
     ref: "FamilyDetails",
   },
 
-  photoReqSent: [
-    {
-      userId: {
-        type: Schema.Types.ObjectId,
-        ref: "UserProfile",
-      },
-
-      status: {
-        type: String,
-        enum: ["pending", "accepted", "rejected"],
-        default: "pending",
-      },
-    },
-  ],
-  photoReqReceived: [
-    {
-      userId: {
-        type: Schema.Types.ObjectId,
-        ref: "UserProfile",
-      },
-      status: {
-        type: String,
-        enum: ["pending", "accepted", "rejected"],
-        default: "pending",
-      },
-    },
-  ],
-
-  reqSent: [
-    {
-      userId: {
-        type: Schema.Types.ObjectId,
-        ref: "UserProfile",
-      },
-
-      status: {
-        type: String,
-        enum: ["pending", "accepted", "rejected"],
-        default: "pending",
-      },
-    },
-  ],
-  reqReceived: [
-    {
-      userId: {
-        type: Schema.Types.ObjectId,
-        ref: "UserProfile", // Reference to the UserProfile model
-      },
-      status: {
-        type: String,
-        enum: ["pending", "accepted", "rejected"],
-        default: "pending",
-      },
-    },
-  ],
 });
 
-module.exports = mongoose.model("UserProfile", UserProfileSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "UserProfile",
+  UserProfileSchema,
+  COLLECTIONS.MATRIMONIAL_USERS
+);

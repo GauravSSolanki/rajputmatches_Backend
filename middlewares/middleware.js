@@ -7,10 +7,12 @@ const crypto = require("crypto");
 const axios = require("axios");
 const qs = require("qs");
 const twilio = require("twilio");
-const User = require("../models/UserProfile");
-const Admin = require("../models/Admin");
-const EmailVerificationToken = require("../models/EmailVerifySchema");
-const Tokenschema = require("../models/tokenSchema");
+const {
+  MatrimonialUser: User,
+  Admin,
+  EmailVerificationToken,
+  PasswordResetToken: Tokenschema,
+} = require("../models");
 
 const { generateToken } = require("../utils/utility");
 
@@ -19,19 +21,18 @@ const sendVerificationEmail = async (email) => {
     // Generate a secure random token
     const token = crypto.randomBytes(32).toString("hex");
 
-    // Prevent duplicate key error by updating existing token or creating a new one
     await EmailVerificationToken.findOneAndUpdate(
       { email }, // Search by email
       { token, createdAt: new Date() }, // Update token and timestamp
-      { upsert: true, new: true, setDefaultsOnInsert: true } // Create new if not found
+      { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const verificationLink = `${process.env.FRONTEND_URL}/verify-email?token=${token}`;
+    const verificationLink = `${process.env.WEBSITE_URL}/verify-email?token=${token}`;
 
     const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: {
-        user: process.env.EMAIL_USER, // Use env variables for security
+        user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
       },
     });
@@ -62,17 +63,20 @@ const sendVerificationEmail = async (email) => {
           </p>
           
           <div style="margin: 20px 0;">
-            <a href="${verificationLink}" style="
-              background-color: #992525; 
-              color: white; 
-              padding: 12px 24px; 
-              text-decoration: none; 
-              font-size: 16px; 
-              border-radius: 5px; 
-              display: inline-block;
-            ">
-              Verify Email
-            </a>
+    <a href="${verificationLink}" 
+   style="
+      background-color: #992525; 
+      color: white; 
+      padding: 12px 24px; 
+      text-decoration: none; 
+      font-size: 16px; 
+      border-radius: 5px; 
+      display: inline-block;
+      transition: background-color 0.3s ease;
+   "
+   onclick="this.style.backgroundColor='#b33b3b'; setTimeout(() => this.style.backgroundColor='#992525', 200);">
+   Verify Email
+</a>
           </div>
           
           <p style="font-size: 14px; color: #777777;">
@@ -90,7 +94,7 @@ const sendVerificationEmail = async (email) => {
         {
           filename: "logoRed.png",
           path: path.join(__dirname, "../uploads/avatar/logowhite.png"),
-          cid: "logoRed", // Embedded image reference
+          cid: "logoRed",
         },
       ],
     };
@@ -130,7 +134,7 @@ const sendEmail = async (email, userId) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const verificationLink = `${process.env.FRONTEND_URL}/set-new-password?token=${token}&userid=${userId}`;
+    const verificationLink = `${process.env.WEBSITE_URL}/set-new-password?token=${token}&userid=${userId}`;
 
     const transporter = nodemailer.createTransport({
       service: "gmail",
@@ -157,7 +161,8 @@ const sendEmail = async (email, userId) => {
           </p>
           
           <div style="margin: 20px 0;">
-            <a href="${verificationLink}" style="background-color: #992525; color: white; padding: 12px 24px; text-decoration: none; font-size: 16px; border-radius: 5px; display: inline-block;">
+            <a href="${verificationLink}" style="background-color: #992525; color: white; padding: 12px 24px; text-decoration: none; font-size: 16px; border-radius: 5px; display: inline-block;"
+               onclick="this.style.backgroundColor='#b33b3b'; setTimeout(() => this.style.backgroundColor='#992525', 200);">
               Reset Password
             </a>
           </div>

@@ -22,4 +22,6 @@ const LimitSchema = new mongoose.Schema({
   },
 });
 
-module.exports = mongoose.model("Limit", LimitSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Limit", LimitSchema, COLLECTIONS.SUBSCRIPTION_LIMITS);

@@ -218,4 +218,10 @@ ExtendedFamilySchema.pre("save", function (next) {
   next();
 });
 
-module.exports = mongoose.model("ExtendedFamily", ExtendedFamilySchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model(
+  "ExtendedFamily",
+  ExtendedFamilySchema,
+  COLLECTIONS.EXTENDED_FAMILY_PROFILES
+);

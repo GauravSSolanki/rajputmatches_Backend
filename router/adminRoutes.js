@@ -1,5 +1,9 @@
 const express = require("express");
-const ContactRequest = require("../models/ContactRequest.js");
+const {
+  ContactRequest,
+  MatrimonialUser: User,
+  Story: Stories,
+} = require("../models");
 const {
   register,
   login,
@@ -27,6 +31,9 @@ const {
   ShareTermsAndPolicy,
   TermsofUse,
   deletePage,
+
+  adminforgotPassword,
+  adminChangePassword,
 } = require("../controllers/adminController.js");
 
 const {
@@ -38,8 +45,6 @@ const {
 
 const router = express.Router();
 const fs = require("fs-extra");
-const User = require("../models/UserProfile.js");
-const Stories = require("../models/StoriesSchema.js");
 
 // Admin-only story creation
 const { createCanvas, loadImage } = require("canvas");
@@ -80,8 +85,8 @@ const convertImageToBase64 = async (imagePath) => {
   }
 };
 
-// router.put("/register", isadminAuth, isAdmin, register);
-router.put("/register", register);
+router.put("/register", isadminAuth, isAdmin, register);
+// router.put("/register", register);
 
 router.post("/login", login);
 router.post(
@@ -201,6 +206,10 @@ router.get("/terms", isadminAuth, isAdmin, TermsofUse);
 router.delete("/terms/:id", isadminAuth, isAdmin, deletePage);
 
 router.put("/limits/update", isadminAuth, isAdmin, updateLimits);
+
+//forget passsword
+router.post("/api/forget-password", adminforgotPassword);
+router.post("/api/reset-password", isadminAuth, isAdmin, adminChangePassword);
 router.get("/dashboard/user-counts", async (req, res) => {
   try {
     // Total members

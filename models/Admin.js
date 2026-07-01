@@ -25,4 +25,6 @@ const AdminSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-module.exports = mongoose.model("Admin", AdminSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Admin", AdminSchema, COLLECTIONS.ADMINS);

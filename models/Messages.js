@@ -32,4 +32,6 @@ const MessageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Message", MessageSchema);
+const { COLLECTIONS } = require("./collections");
+
+module.exports = mongoose.model("Message", MessageSchema, COLLECTIONS.CHAT_MESSAGES);
